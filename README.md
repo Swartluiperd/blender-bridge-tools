@@ -140,8 +140,9 @@ Which bridges need it:
 
 - **Auto-Bridge** already builds its posts down to the floor, so it doesn't
   create these overhangs.
-- **Add Bridge Cube** runs this tool automatically on the cubes it adds
-  (option **Support Overhangs**, on by default).
+- **Add Bridge Cube** can run it on the cubes it adds: tick
+  **Support overhangs** in the panel. It's **off by default**, so cubes
+  only span the selected edge unless you ask for more.
 - Run it by hand on models bridged with cubes or Booleans before this
   version, or with other tools.
 

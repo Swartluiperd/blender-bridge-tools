@@ -66,8 +66,9 @@ Two tools are provided:
    straight down to the surface below it, or to the bottom of the model.
    Like Auto-Bridge it edits the mesh directly; no Boolean is used.
    (Auto-Bridge already builds its posts down to the floor; this mainly
-   fixes bridges made with cubes / Booleans. Add Bridge Cube runs it
-   automatically on the cubes it adds.)
+   fixes bridges made with cubes / Booleans. Add Bridge Cube can run it
+   on the cubes it adds when "Support overhangs" is ticked - off by
+   default.)
 
 A helper for inspecting problems is also included:
 
@@ -703,7 +704,7 @@ class MESH_OT_add_bridge_post(bpy.types.Operator):
         description="Merge the cube(s) with Intersect (Boolean) Union. "
                     "Turn off to just add the cube geometry")
     support: BoolProperty(
-        name="Support Overhangs", default=True,
+        name="Support Overhangs", default=False,
         description="After merging, extend any part of the new cube(s) that hangs "
                     "over empty space down to the surface below or the bottom of the model")
 
@@ -712,7 +713,9 @@ class MESH_OT_add_bridge_post(bpy.types.Operator):
         return context.edit_object is not None and context.edit_object.type == 'MESH'
 
     def invoke(self, context, event):
+        # Use the settings from the sidebar panel when run from the UI.
         self.size_mm = context.scene.bridge_tools_size_mm
+        self.support = context.scene.bridge_tools_support_overhangs
         return self.execute(context)
 
     def execute(self, context):
@@ -943,6 +946,8 @@ class VIEW3D_PT_bridge_tools(bpy.types.Panel):
         col.separator()
         col.operator(MESH_OT_auto_bridge_corners.bl_idname, icon='MOD_BUILD')
         col.operator(MESH_OT_add_bridge_post.bl_idname, icon='MESH_CUBE')
+        col.prop(context.scene, "bridge_tools_support_overhangs")
+        col.separator()
         col.operator(MESH_OT_support_overhangs.bl_idname, icon='TRIA_DOWN_BAR')
 
         # Step through selection
@@ -979,6 +984,11 @@ def register():
     bpy.types.Scene.bridge_tools_size_mm = FloatProperty(
         name="Bridge Size (mm)", default=0.2, min=0.01, max=10.0,
         description="Width of the square bridge posts")
+    bpy.types.Scene.bridge_tools_support_overhangs = BoolProperty(
+        name="Support overhangs", default=False,
+        description="Add Bridge Cube: extend any part of a new cube that hangs over "
+                    "empty space down to the surface below, or to the bottom of the model "
+                    "for through-holes. Off by default")
     bpy.types.Scene.bridge_tools_step_zoom = BoolProperty(
         name="Zoom to Element", default=True,
         description="Zoom in on each element when stepping. "
@@ -1001,6 +1011,7 @@ def unregister():
     del bpy.types.WindowManager.bridge_tools_step_key
     del bpy.types.WindowManager.bridge_tools_step_index
     del bpy.types.Scene.bridge_tools_step_zoom
+    del bpy.types.Scene.bridge_tools_support_overhangs
     del bpy.types.Scene.bridge_tools_size_mm
 
 
