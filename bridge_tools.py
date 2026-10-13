@@ -58,6 +58,15 @@ Two tools are provided:
    on meshes with tiny floating-point noise - if the non-manifold count goes
    up, undo and use Auto-Bridge instead.
 
+A helper for inspecting problems is also included:
+
+3. Step Through Selection (Previous / Next)
+   Cycles through the currently selected vertices, edges or faces one at a
+   time. Each step centres (and optionally zooms) the view on one element,
+   makes it the active element, and reports its position and size. The
+   selection itself is never changed. Handy after the 3D Print Toolbox
+   selects e.g. all "Zero Edges" or "Non-Manifold Edges".
+
 Assumptions (Auto-Bridge)
 -------------------------
 * The model is axis-aligned: block walls face +X, -X, +Y or -Y and block
@@ -72,7 +81,7 @@ the mesh is left unchanged at those corners.
 bl_info = {
     "name": "Bridge Tools (non-manifold corner fixer)",
     "author": "Swartluiperd (developed with Claude, Anthropic)",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Edit Mode > Sidebar (N) > Bridges tab, and Mesh / right-click menus",
     "description": "Fixes 'diagonal contact' non-manifold edges (4 faces on one vertical edge) "
@@ -85,7 +94,7 @@ bl_info = {
 import bpy
 import bmesh
 from mathutils import Vector
-from bpy.props import FloatProperty, BoolProperty
+from bpy.props import FloatProperty, BoolProperty, IntProperty, StringProperty
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +493,118 @@ class MESH_OT_add_bridge_post(bpy.types.Operator):
 
 
 # ---------------------------------------------------------------------------
+# Step through selection
+# ---------------------------------------------------------------------------
+#
+# State is kept on the WindowManager (not saved in the .blend file):
+#   bridge_tools_step_index  - position in the current list (0-based)
+#   bridge_tools_step_key    - a fingerprint of the selection; when the
+#                              selection changes, stepping restarts at 1
+#   bridge_tools_step_info   - the last "3 of 17 ..." message, shown in the panel
+
+def _selected_elements(bm, context):
+    """Return (kind, elements) for the current selection, in a stable order.
+
+    The element type follows Blender's select mode: faces in face mode,
+    edges in edge mode, otherwise vertices.
+    """
+    vert_mode, edge_mode, face_mode = context.tool_settings.mesh_select_mode
+    if face_mode and not vert_mode and not edge_mode:
+        kind, seq = "face", bm.faces
+    elif edge_mode and not vert_mode:
+        kind, seq = "edge", bm.edges
+    else:
+        kind, seq = "vertex", bm.verts
+    seq.index_update()   # make sure indices are current after any edits
+    return kind, [el for el in seq if el.select]
+
+
+def _element_verts(el):
+    return [el] if isinstance(el, bmesh.types.BMVert) else list(el.verts)
+
+
+def _world_mm(context):
+    """Multiplier from Blender world units to millimetres."""
+    return (context.scene.unit_settings.scale_length or 1.0) * 1000.0
+
+
+class MESH_OT_step_selection(bpy.types.Operator):
+    """Step to the next or previous selected element, centring the view on it """ \
+        """and making it active. The selection itself is not changed"""
+    bl_idname = "mesh.bridge_step_selection"
+    bl_label = "Step Through Selection"
+    bl_options = {'REGISTER'}
+
+    direction: IntProperty(name="Direction", default=1, min=-1, max=1,
+                           description="1 = next element, -1 = previous element")
+
+    @classmethod
+    def poll(cls, context):
+        return (context.edit_object is not None
+                and context.edit_object.type == 'MESH'
+                and context.space_data is not None
+                and context.space_data.type == 'VIEW_3D')
+
+    def execute(self, context):
+        obj = context.edit_object
+        wm = context.window_manager
+        bm = bmesh.from_edit_mesh(obj.data)
+        kind, elems = _selected_elements(bm, context)
+        if not elems:
+            wm.bridge_tools_step_info = ""
+            self.report({'WARNING'}, "Nothing selected. Select some vertices, edges or faces first.")
+            return {'CANCELLED'}
+
+        # Restart when the object, select mode or selection has changed.
+        idx = [el.index for el in elems]
+        key = f"{obj.name}|{kind}|{len(idx)}|{idx[0]}|{idx[-1]}|{sum(idx)}"
+        if key != wm.bridge_tools_step_key:
+            wm.bridge_tools_step_key = key
+            pos = 0 if self.direction >= 0 else len(elems) - 1
+        else:
+            pos = (wm.bridge_tools_step_index + (1 if self.direction >= 0 else -1)) % len(elems)
+        wm.bridge_tools_step_index = pos
+        el = elems[pos]
+
+        # Make it the active element (drawn highlighted) without changing
+        # which elements are selected.
+        bm.select_history.clear()
+        bm.select_history.add(el)
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+
+        # Centre of the element and its size, in world space.
+        mw = obj.matrix_world
+        pts = [mw @ v.co for v in _element_verts(el)]
+        centre = sum(pts, Vector()) / len(pts)
+        size = max(((p - q).length for p in pts for q in pts), default=0.0)
+
+        rv3d = context.space_data.region_3d
+        rv3d.view_location = centre
+        if context.scene.bridge_tools_step_zoom:
+            # About 8x the element size, but never closer than 2 mm so tiny
+            # or zero-length elements still show their surroundings.
+            min_dist = 0.002 / (context.scene.unit_settings.scale_length or 1.0)
+            rv3d.view_distance = max(size * 8.0, min_dist)
+
+        mm = _world_mm(context)
+        if kind == "edge":
+            measure = f"length {(pts[0] - pts[1]).length * mm:.4f} mm"
+        elif kind == "face":
+            # World-space area of the (planar or nearly planar) polygon,
+            # summed as a fan of triangles from the first corner.
+            area = sum(((pts[i] - pts[0]).cross(pts[i + 1] - pts[0])).length / 2
+                       for i in range(1, len(pts) - 1))
+            measure = f"area {area * mm * mm:.6f} mm²"
+        else:
+            measure = f"{len(el.link_faces)} face(s)"
+        info = (f"{kind.capitalize()} {pos + 1} of {len(elems)}: {measure}, "
+                f"at ({centre.x * mm:.3f}, {centre.y * mm:.3f}, {centre.z * mm:.3f}) mm")
+        wm.bridge_tools_step_info = info
+        self.report({'INFO'}, info)
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------------
 # User interface
 # ---------------------------------------------------------------------------
 
@@ -502,6 +623,23 @@ class VIEW3D_PT_bridge_tools(bpy.types.Panel):
         col.operator(MESH_OT_auto_bridge_corners.bl_idname, icon='MOD_BUILD')
         col.operator(MESH_OT_add_bridge_post.bl_idname, icon='MESH_CUBE')
 
+        # Step through selection
+        box = self.layout.box()
+        box.label(text="Step Through Selection", icon='VIEWZOOM')
+        row = box.row(align=True)
+        row.operator(MESH_OT_step_selection.bl_idname, text="Previous",
+                     icon='TRIA_LEFT').direction = -1
+        row.operator(MESH_OT_step_selection.bl_idname, text="Next",
+                     icon='TRIA_RIGHT').direction = 1
+        box.prop(context.scene, "bridge_tools_step_zoom")
+        info = context.window_manager.bridge_tools_step_info
+        if info:
+            # Split "Edge 3 of 17: length ..., at (...)" over two lines.
+            head, _, tail = info.partition(", at ")
+            box.label(text=head)
+            if tail:
+                box.label(text="at " + tail)
+
 
 def _menu(self, context):
     """Adds both tools to the Mesh menu and the right-click menu."""
@@ -510,13 +648,21 @@ def _menu(self, context):
     self.layout.operator(MESH_OT_add_bridge_post.bl_idname, icon='MESH_CUBE')
 
 
-classes = (MESH_OT_auto_bridge_corners, MESH_OT_add_bridge_post, VIEW3D_PT_bridge_tools)
+classes = (MESH_OT_auto_bridge_corners, MESH_OT_add_bridge_post,
+           MESH_OT_step_selection, VIEW3D_PT_bridge_tools)
 
 
 def register():
     bpy.types.Scene.bridge_tools_size_mm = FloatProperty(
         name="Bridge Size (mm)", default=0.2, min=0.01, max=10.0,
         description="Width of the square bridge posts")
+    bpy.types.Scene.bridge_tools_step_zoom = BoolProperty(
+        name="Zoom to Element", default=True,
+        description="Zoom in on each element when stepping. "
+                    "Turn off to only centre the view and keep the current zoom")
+    bpy.types.WindowManager.bridge_tools_step_index = IntProperty(default=0)
+    bpy.types.WindowManager.bridge_tools_step_key = StringProperty(default="")
+    bpy.types.WindowManager.bridge_tools_step_info = StringProperty(default="")
     for c in classes:
         bpy.utils.register_class(c)
     bpy.types.VIEW3D_MT_edit_mesh.append(_menu)
@@ -528,6 +674,10 @@ def unregister():
     bpy.types.VIEW3D_MT_edit_mesh.remove(_menu)
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
+    del bpy.types.WindowManager.bridge_tools_step_info
+    del bpy.types.WindowManager.bridge_tools_step_key
+    del bpy.types.WindowManager.bridge_tools_step_index
+    del bpy.types.Scene.bridge_tools_step_zoom
     del bpy.types.Scene.bridge_tools_size_mm
 
 

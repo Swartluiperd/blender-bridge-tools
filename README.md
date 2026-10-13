@@ -2,7 +2,8 @@
 
 A small Blender add-on that makes block-grid models **manifold** (watertight)
 for 3D printing by adding tiny square "bridges" wherever two blocks — or two
-holes — touch only along a single edge.
+holes — touch only along a single edge. It also includes a **Step Through
+Selection** helper for inspecting flagged problem spots one at a time.
 
 Developed by [Swartluiperd](https://github.com/Swartluiperd) with the help of
 Claude (Anthropic).
@@ -105,6 +106,37 @@ Blender's *Intersect (Boolean)* Union.
   of tiny floating-point differences. If the reported non-manifold count
   goes **up**, press **Ctrl+Z** and use Auto-Bridge instead.
 
+### Step Through Selection
+
+A helper for inspecting problem spots one at a time. It lives in the
+**Step Through Selection** box in the sidebar panel.
+
+1. Select the elements you want to inspect. For example, click
+   *Non-manifold Edges* or *Zero Edges* in the 3D Print Toolbox results,
+   which selects them. Or use *Select → Select All by Trait*.
+2. Click **Next** (or **Previous**) to move through them one by one.
+
+Each step:
+
+- centres the view on the element and, if **Zoom to Element** is ticked,
+  zooms in to about 8× its size (never closer than 2 mm);
+- makes it the **active** element, drawn highlighted, so you can see
+  exactly which one you're on;
+- shows its number and a measurement in the panel and status bar, e.g.
+  `Edge 3 of 17: length 0.1000 mm, at (12.500, -6.250, 0.197) mm`.
+
+Notes:
+
+- The **selection is never changed**. All the elements stay selected, so
+  you can still fix them all at once afterwards.
+- The element type follows the select mode: vertices, edges or faces
+  (keys **1 / 2 / 3** in Edit Mode). Vertices report how many faces use
+  them, edges report their length, and faces report their area.
+- Stepping wraps around at either end. Changing the selection or the
+  select mode starts again from 1.
+- Tip: untick **Zoom to Element** to keep your current zoom level and only
+  pan to each element.
+
 ### Bridge size
 
 Set **Bridge Size (mm)** in the sidebar panel before running either tool.
@@ -121,6 +153,12 @@ unit scale and the object's scale.
   undone with **Ctrl+Z**.
 - **Check afterwards.** Run *3D Print Toolbox → Check All*, or *Select →
   Select All by Trait → Non-Manifold*, to confirm the count is 0.
+- **"Zero Edges" / "Zero Faces" on very small models.** The 3D Print
+  Toolbox reports edges and faces smaller than its **Degenerate** threshold,
+  which defaults to 0.0001 m (0.1 mm). On fine models, and with 0.2 mm
+  bridges, real features can be that small. Lower the threshold to e.g.
+  0.000001 m (0.001 mm) and re-check. Anything still reported is genuinely
+  degenerate, and **Step Through Selection** makes it easy to inspect.
 - **Avoid noise when building tiles.** Position copies by typing exact
   values rather than dragging or scaling them. This keeps coordinates clean,
   which matters most for the Boolean-based tool.

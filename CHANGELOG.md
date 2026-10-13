@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-10-13
+
+### Added
+- **Step Through Selection**: **Previous / Next** buttons in the Bridges
+  sidebar panel that cycle through the selected vertices, edges or faces one
+  at a time. Each step centres the view (optionally zooming in), makes the
+  element active, and shows its number, position and length, area or
+  face count. The selection itself is not changed.
+- **Zoom to Element** option for the stepper.
+- README: explanation of the 3D Print Toolbox's "Zero Edges / Zero Faces"
+  results on very small models, and the Degenerate threshold.
+
+### Tested
+- On Blender 5.2: stepping forwards and backwards with wrap-around in edge
+  and face mode, with the selection left unchanged, and a clear warning when
+  nothing is selected.
+
 ## [1.0.0] - 2026-10-13
 
 ### Added
