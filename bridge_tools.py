@@ -58,9 +58,20 @@ Two tools are provided:
    on meshes with tiny floating-point noise - if the non-manifold count goes
    up, undo and use Auto-Bridge instead.
 
+3. Support Overhanging Bridges
+   Where a bridge spans a corner whose two low sides are at different
+   heights, part of its underside can hang over empty space - over a lower
+   block or a through-hole. Slicers may want to put supports there. This
+   tool finds those overhanging bridge undersides and extends each one
+   straight down to the surface below it, or to the bottom of the model.
+   Like Auto-Bridge it edits the mesh directly; no Boolean is used.
+   (Auto-Bridge already builds its posts down to the floor; this mainly
+   fixes bridges made with cubes / Booleans. Add Bridge Cube runs it
+   automatically on the cubes it adds.)
+
 A helper for inspecting problems is also included:
 
-3. Step Through Selection (Previous / Next)
+4. Step Through Selection (Previous / Next)
    Cycles through the currently selected vertices, edges or faces one at a
    time. Each step centres (and optionally zooms) the view on one element,
    makes it the active element, and reports its position and size. The
@@ -337,6 +348,265 @@ def _bridge_one(bm, e, h):
 
 
 # ---------------------------------------------------------------------------
+# Supporting overhanging bridge undersides
+# ---------------------------------------------------------------------------
+#
+# A cube-style bridge (or the Boolean of one) spans only the height of the
+# shared edge. If the two LOW quadrants at that corner are at different
+# heights, the bridge's underside in the lower quadrant hangs over empty
+# space, seen from the side:
+#
+#        bridge           The small square underside F of the bridge (in
+#     +--------+          quadrant B) has nothing directly beneath it.
+#     |        |
+#     +---F----+   <-- overhang
+#     |  void  |
+#     | (B)    |
+#   --+--------+--  floor of B, or the bottom of the model (through-hole)
+#
+# The fix extends F straight down into a small column that stands on B's
+# floor, or reaches the bottom of the model if B is a through-hole. Two
+# sides of the column lie against the walls of the neighbouring blocks, so
+# it is attached along its full height.
+
+def _edge_toward(v, d, h):
+    """Horizontal edge leaving v in direction d that is at least h long.
+
+    Returns (edge, length) or (None, 0). Unlike _hedge, an edge of exactly
+    length h is accepted, because the existing bridge corner may already
+    sit there.
+    """
+    for e in v.link_edges:
+        o = e.other_vert(v)
+        dv = o.co - v.co
+        if (abs(dv.z) < 1e-7
+                and dv.length > h * 0.999
+                and abs(dv.normalized().dot(d) - 1) < 1e-5):
+            return e, dv.length
+    return None, 0.0
+
+
+def _point_toward(bm, v, d, h):
+    """Return a vertex at v + d*h on the horizontal edge leaving v in direction d.
+
+    Reuses the far end of the edge if it is already exactly h away,
+    otherwise splits the edge. Returns None if there is no such edge.
+    """
+    e, length = _edge_toward(v, d, h)
+    if e is None:
+        return None
+    if abs(length - h) < h * 1e-3:
+        o = e.other_vert(v)
+        o.co = v.co + d * h
+        return o
+    _new_edge, nv = bmesh.utils.edge_split(e, v, h / length)
+    nv.co = v.co + d * h
+    return nv
+
+
+def _overhang_candidates(bm, max_area):
+    """Small square downward-facing faces above the bottom of the model."""
+    bm.normal_update()
+    zmin = min(v.co.z for v in bm.verts)
+    faces = [f for f in bm.faces
+             if f.normal.z < -0.999 and len(f.verts) == 4
+             and f.calc_area() <= max_area
+             and f.verts[0].co.z > zmin + 1e-9]
+    return faces, zmin
+
+
+def _corner_line_verts(bm_verts_by_xy, f):
+    """All vertices on the vertical lines through the corners of face f."""
+    out = []
+    for v in f.verts:
+        out.extend(w for w in bm_verts_by_xy.get((round(v.co.x, 7), round(v.co.y, 7)), [])
+                   if w.is_valid)
+    return out
+
+
+def _support_one(bm, f, zmin):
+    """Extend the overhanging square face f straight down.
+
+    Returns ("floor" | "through", added_volume) on success, or a short
+    reason string if the corner was skipped (the mesh is then unchanged).
+    """
+    zf = f.verts[0].co.z
+
+    # The corner line L: the face vertex with a vertical edge going down.
+    L = None
+    for v in f.verts:
+        if any(_same_xy(e.other_vert(v), v) and e.other_vert(v).co.z < zf - 1e-9
+               for e in v.link_edges):
+            L = v
+            break
+    if L is None:
+        return "not a bridge"
+
+    # The outer corner O is diagonally opposite L; together they give the
+    # quadrant (sx, sy) that the face hangs over and its size h.
+    O = max((v for v in f.verts if v is not L), key=lambda v: (v.co - L.co).length)
+    sx = 1 if O.co.x > L.co.x else -1
+    sy = 1 if O.co.y > L.co.y else -1
+    h = abs(O.co.x - L.co.x)
+    if h < 1e-9 or abs(abs(O.co.y - L.co.y) - h) > h * 1e-3:
+        return "not square"
+    dx, dy = Vector((sx, 0, 0)), Vector((0, sy, 0))
+
+    # Vertical chain from L down the corner line.
+    chain = [L]
+    cur = L
+    while True:
+        below = [e.other_vert(cur) for e in cur.link_edges
+                 if _same_xy(e.other_vert(cur), cur)
+                 and e.other_vert(cur).co.z < cur.co.z - 1e-9]
+        if not below:
+            break
+        cur = below[0]
+        chain.append(cur)
+    Lb = chain[-1]
+    zb = Lb.co.z
+
+    # Is there a floor (an upward face at Lb opening into the quadrant)?
+    floor_face = None
+    for g in Lb.link_faces:
+        if g.normal.z > 0.999:
+            vs = list(g.verts)
+            i = vs.index(Lb)
+            nb = [vs[i - 1].co - Lb.co, vs[(i + 1) % len(vs)].co - Lb.co]
+            q = (1 if sum(n.x for n in nb) > 0 else -1, 1 if sum(n.y for n in nb) > 0 else -1)
+            if q == (sx, sy):
+                floor_face = g
+                break
+    through = floor_face is None
+    if through and zb > zmin + 1e-9:
+        return "open below"            # no floor, but not the model bottom either
+
+    # Checks before modifying anything.
+    for v in chain:
+        for e in v.link_edges:
+            o = e.other_vert(v)
+            if not _same_xy(o, v) and abs((o.co - v.co).z) > 1e-7:
+                return "slanted edges"
+    if _edge_toward(Lb, dx, h)[0] is None or _edge_toward(Lb, dy, h)[0] is None:
+        return "no edges at the bottom"
+
+    def is_wall(g):
+        """A wall of the void quadrant: in plane y=Ly or x=Lx, on the void's side."""
+        if abs(g.normal.z) > 0.1:
+            return False
+        if all(abs(w.co.y - L.co.y) < 1e-9 for w in g.verts):
+            return all((w.co.x - L.co.x) * sx > -1e-9 for w in g.verts)
+        if all(abs(w.co.x - L.co.x) < 1e-9 for w in g.verts):
+            return all((w.co.y - L.co.y) * sy > -1e-9 for w in g.verts)
+        return False
+
+    walls = set(g for v in chain for g in v.link_faces if is_wall(g))
+    keep = {Lb} if through else set()          # Lb stays as a corner of the base
+    remove = set(chain) - keep
+    expected = walls | {f} | ({floor_face} if floor_face else set())
+    if set(g for v in remove for g in v.link_faces) - expected:
+        return "unexpected faces"
+
+    # Split the wall edges at distance h from every chain vertex.
+    Px, Py = [], []
+    for v in chain:
+        a = _point_toward(bm, v, dx, h)
+        b = _point_toward(bm, v, dy, h)
+        if a:
+            Px.append(a)
+        if b:
+            Py.append(b)
+    Px.sort(key=lambda v: -v.co.z)             # top ... bottom
+    Py.sort(key=lambda v: -v.co.z)
+    walls = set(g for v in chain for g in v.link_faces if is_wall(g))
+
+    # Rebuild: walls lose the corner strip, the column gets two sides, and
+    # either a bottom face (through-hole) or a notch in the floor face.
+    new_faces = [[v for v in g.verts if v not in remove and v is not Lb] for g in walls]
+    old_faces = [f] + list(walls)
+    Ob = bm.verts.new((O.co.x, O.co.y, zb))
+    new_faces.append([O] + Px + [Ob])
+    new_faces.append([O] + Py + [Ob])
+    if through:
+        new_faces.append([Lb, Px[-1], Ob, Py[-1]])
+    else:
+        vs = list(floor_face.verts)
+        vs[vs.index(Lb)] = Ob
+        new_faces.append(vs)
+        old_faces.append(floor_face)
+
+    for g in old_faces:
+        bm.faces.remove(g)
+    for vs in new_faces:
+        bm.faces.new(vs)
+    for v in chain:
+        if v.is_valid and v not in keep:
+            for e in list(v.link_edges):
+                if not e.link_faces:
+                    bm.edges.remove(e)
+            if not v.link_edges:
+                bm.verts.remove(v)
+    return ("through" if through else "floor"), h * h * (zf - zb)
+
+
+def support_overhangs(bm, max_area, region=None):
+    """Support every overhanging bridge underside in bm.
+
+    `region`, if given, is a list of (x, y) points; only faces with a corner
+    on one of those vertical lines are handled. Returns a summary dict.
+    """
+    faces, zmin = _overhang_candidates(bm, max_area)
+    if region is not None:
+        keys = {(round(x, 7), round(y, 7)) for x, y in region}
+        faces = [f for f in faces
+                 if any((round(v.co.x, 7), round(v.co.y, 7)) in keys for v in f.verts)]
+
+    # Vertices grouped by their vertical line, for the seam cleanup below.
+    by_xy = {}
+    for v in bm.verts:
+        by_xy.setdefault((round(v.co.x, 7), round(v.co.y, 7)), []).append(v)
+
+    done = {"floor": 0, "through": 0}
+    skipped = []
+    for f in faces:
+        if not f.is_valid:
+            continue
+        centre = f.calc_center_median()
+        result = _support_one(bm, f, zmin)
+        if result in ("slanted edges", "unexpected faces"):
+            # Walls are often cut into triangles by Booleans. Merge the flat
+            # pieces around this corner and try once more.
+            if _dissolve_slanted_coplanar(bm, _corner_line_verts(by_xy, f)):
+                bm.normal_update()
+                result = _support_one(bm, f, zmin) if f.is_valid else "changed"
+        if isinstance(result, tuple):
+            done[result[0]] += 1
+        elif result != "not a bridge":
+            skipped.append((centre.x, centre.y, centre.z, result))
+
+    for e in [e for e in bm.edges if not e.link_faces]:
+        bm.edges.remove(e)
+    for v in [v for v in bm.verts if not v.link_edges]:
+        bm.verts.remove(v)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return {"floor": done["floor"], "through": done["through"], "skipped": skipped}
+
+
+def _support_message(summary, obj, mm):
+    """Human-readable result; positions are converted to world millimetres."""
+    n = summary["floor"] + summary["through"]
+    msg = (f"Supported {n} overhanging bridge part(s) "
+           f"({summary['floor']} onto a lower block, {summary['through']} down a through-hole).")
+    if summary["skipped"]:
+        pts = []
+        for x, y, z, _reason in summary["skipped"][:5]:
+            w = obj.matrix_world @ Vector((x, y, z))
+            pts.append(f"({w.x * mm:.2f}, {w.y * mm:.2f}, {w.z * mm:.3f})")
+        msg += f" Skipped {len(summary['skipped'])} at {', '.join(pts)} mm."
+    return msg
+
+
+# ---------------------------------------------------------------------------
 # Operators
 # ---------------------------------------------------------------------------
 
@@ -430,6 +700,10 @@ class MESH_OT_add_bridge_post(bpy.types.Operator):
         name="Union into Mesh", default=True,
         description="Merge the cube(s) with Intersect (Boolean) Union. "
                     "Turn off to just add the cube geometry")
+    support: BoolProperty(
+        name="Support Overhangs", default=True,
+        description="After merging, extend any part of the new cube(s) that hangs "
+                    "over empty space down to the surface below or the bottom of the model")
 
     @classmethod
     def poll(cls, context):
@@ -483,12 +757,57 @@ class MESH_OT_add_bridge_post(bpy.types.Operator):
                                        use_self=False, solver='EXACT')
         bm = bmesh.from_edit_mesh(obj.data)
         bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-9)
+
+        extra = ""
+        if self.support:
+            # Only look at the vertical lines where the new cubes stand.
+            summary = support_overhangs(bm, max_area=(h * h) * 1.5,
+                                        region=[(x, y) for x, y, _z0, _z1 in spans])
+            n = summary["floor"] + summary["through"]
+            if n or summary["skipped"]:
+                extra = " " + _support_message(summary, obj, _world_mm(context))
         bmesh.update_edit_mesh(obj.data)
+
         non_manifold = sum(1 for e in bm.edges if not e.is_manifold)
         self.report(
             {'INFO'} if non_manifold == 0 else {'WARNING'},
             f"Added {len(spans)} bridge cube(s). Non-manifold edges now: {non_manifold}."
+            + extra
             + ("" if non_manifold == 0 else " If this went up, undo and use Auto-Bridge instead."))
+        return {'FINISHED'}
+
+
+class MESH_OT_support_overhangs(bpy.types.Operator):
+    """Extend overhanging bridge undersides straight down to the surface below """ \
+        """(or to the bottom of the model), so slicers don't need supports there"""
+    bl_idname = "mesh.support_bridge_overhangs"
+    bl_label = "Support Overhanging Bridges"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    size_mm: FloatProperty(
+        name="Bridge Size (mm)", default=0.2, min=0.01, max=10.0,
+        description="Size of the bridges to look for. Undersides up to half this "
+                    "size (one quadrant of a bridge) are treated as bridge overhangs")
+
+    @classmethod
+    def poll(cls, context):
+        return context.edit_object is not None and context.edit_object.type == 'MESH'
+
+    def invoke(self, context, event):
+        self.size_mm = context.scene.bridge_tools_size_mm
+        return self.execute(context)
+
+    def execute(self, context):
+        obj = context.edit_object
+        bm = bmesh.from_edit_mesh(obj.data)
+        half = _mm_to_local(obj, self.size_mm) / 2.0
+        # One quadrant of a bridge is half x half; allow some margin.
+        summary = support_overhangs(bm, max_area=(half * half) * 1.5)
+        bmesh.update_edit_mesh(obj.data)
+        non_manifold = sum(1 for e in bm.edges if not e.is_manifold)
+        msg = _support_message(summary, obj, _world_mm(context))
+        msg += f" Non-manifold edges now: {non_manifold}."
+        self.report({'WARNING'} if summary["skipped"] or non_manifold else {'INFO'}, msg)
         return {'FINISHED'}
 
 
@@ -622,6 +941,7 @@ class VIEW3D_PT_bridge_tools(bpy.types.Panel):
         col.separator()
         col.operator(MESH_OT_auto_bridge_corners.bl_idname, icon='MOD_BUILD')
         col.operator(MESH_OT_add_bridge_post.bl_idname, icon='MESH_CUBE')
+        col.operator(MESH_OT_support_overhangs.bl_idname, icon='TRIA_DOWN_BAR')
 
         # Step through selection
         box = self.layout.box()
@@ -646,10 +966,11 @@ def _menu(self, context):
     self.layout.separator()
     self.layout.operator(MESH_OT_auto_bridge_corners.bl_idname, icon='MOD_BUILD')
     self.layout.operator(MESH_OT_add_bridge_post.bl_idname, icon='MESH_CUBE')
+    self.layout.operator(MESH_OT_support_overhangs.bl_idname, icon='TRIA_DOWN_BAR')
 
 
 classes = (MESH_OT_auto_bridge_corners, MESH_OT_add_bridge_post,
-           MESH_OT_step_selection, VIEW3D_PT_bridge_tools)
+           MESH_OT_support_overhangs, MESH_OT_step_selection, VIEW3D_PT_bridge_tools)
 
 
 def register():
