@@ -7,6 +7,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [1.1.0] - 2026-10-13
 
 ### Added
+- **Support Overhanging Bridges**: finds bridge undersides that hang over
+  empty space (where a corner's two low sides are at different heights) and
+  extends each one straight down onto the lower block, or to the bottom of
+  the model for through-holes. Edits the mesh directly, without a Boolean.
+- **Add Bridge Cube** now supports overhangs on the cubes it adds (option
+  **Support Overhangs**, on by default).
 - **Step Through Selection**: **Previous / Next** buttons in the Bridges
   sidebar panel that cycle through the selected vertices, edges or faces one
   at a time. Each step centres the view (optionally zooming in), makes the
@@ -16,10 +22,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - README: explanation of the 3D Print Toolbox's "Zero Edges / Zero Faces"
   results on very small models, and the Degenerate threshold.
 
+### Changed
+- **Auto-Bridge**: when a corner fails, flat wall pieces are now merged
+  along the whole vertical corner line before retrying, not only at the two
+  ends of the shared edge.
+
 ### Tested
-- On Blender 5.2: stepping forwards and backwards with wrap-around in edge
-  and face mode, with the selection left unchanged, and a clear warning when
-  nothing is selected.
+- On Blender 5.2: Support Overhanging Bridges on six tiles (7, 17, 35, 63
+  and 173 overhangs). All overhangs were supported, no non-manifold edges
+  were added, and the volume added matched the expected column volume
+  exactly.
+- Add Bridge Cube on a raw 20 × 20 mm tile: 14 cubes added, 0 non-manifold
+  edges and 0 overhangs left.
+- Stepping forwards and backwards with wrap-around in edge and face mode,
+  with the selection left unchanged, and a clear warning when nothing is
+  selected.
 
 ## [1.0.0] - 2026-10-13
 

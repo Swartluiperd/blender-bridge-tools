@@ -2,8 +2,10 @@
 
 A small Blender add-on that makes block-grid models **manifold** (watertight)
 for 3D printing by adding tiny square "bridges" wherever two blocks — or two
-holes — touch only along a single edge. It also includes a **Step Through
-Selection** helper for inspecting flagged problem spots one at a time.
+holes — touch only along a single edge. It can also **support overhanging
+bridges** so slicers don't need supports under them, and includes a **Step
+Through Selection** helper for inspecting flagged problem spots one at a
+time.
 
 Developed by [Swartluiperd](https://github.com/Swartluiperd) with the help of
 Claude (Anthropic).
@@ -49,7 +51,8 @@ diagonal high blocks and gives every edge exactly two faces.
 +------+------+
 ```
 
-It handles two kinds of corner:
+Posts are always built down to whatever is beneath them, so no part of a
+bridge is left hanging in the air. It handles two kinds of corner:
 
 - **Step corners**: the low quadrants are lower blocks. The post stands on
   each lower block and rises to the top of the edge.
@@ -105,6 +108,45 @@ Blender's *Intersect (Boolean)* Union.
 - Booleans can fail on meshes that were scaled, copied or joined, because
   of tiny floating-point differences. If the reported non-manifold count
   goes **up**, press **Ctrl+Z** and use Auto-Bridge instead.
+
+### Support Overhanging Bridges
+
+A bridge joins two diagonal blocks across a corner. If the two **low** sides
+of that corner are at different heights, part of the bridge's underside can
+hang over empty space, either above a lower block or above a through-hole.
+Slicers may then want a support under it, which can be hard to remove in a
+tight corner.
+
+```
+ Side view:      +--------+  bridge
+                 |        |
+                 +--F-----+  <- F hangs over empty space
+                 |  void  |
+              ---+--------+---  lower block, or bottom of the model
+```
+
+**Support Overhanging Bridges** finds those overhanging bridge undersides
+and extends each one straight down into a small column:
+
+- onto the **lower block** beneath it, or
+- all the way to the **bottom of the model** if it sits over a through-hole.
+
+Two sides of each column lie against the walls of the neighbouring blocks,
+so it is attached along its full height. No selection is needed. Like
+Auto-Bridge, it edits the mesh directly instead of using a Boolean. It
+reports how many it supported, and lists any it had to skip.
+
+Which bridges need it:
+
+- **Auto-Bridge** already builds its posts down to the floor, so it doesn't
+  create these overhangs.
+- **Add Bridge Cube** runs this tool automatically on the cubes it adds
+  (option **Support Overhangs**, on by default).
+- Run it by hand on models bridged with cubes or Booleans before this
+  version, or with other tools.
+
+Set **Bridge Size (mm)** to the size of the existing bridges, 0.2 mm by
+default. Only bridge-sized undersides are treated as bridge overhangs.
 
 ### Step Through Selection
 
@@ -192,6 +234,10 @@ half-edited.
 ## Limitations
 
 - Only **vertical** problem edges in **axis-aligned** geometry are handled.
+- Heights must be clean. If blocks that should be level differ by tiny
+  amounts, e.g. 0.1973 vs 0.1972 mm after scaling, edges aren't recognised
+  as horizontal and those corners are skipped. Snapping heights to exact
+  levels first fixes this.
 - The walls next to the corner must be longer than 1.5× half the bridge
   width. At the default 0.2 mm, that's about 0.15 mm.
 - Non-manifold edges of other kinds, such as open holes or cracks
