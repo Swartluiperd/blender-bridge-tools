@@ -659,11 +659,13 @@ class MESH_OT_auto_bridge_corners(bpy.types.Operator):
                 fixed += 1
                 continue
 
-            # First failure at this corner: try removing slanted wall seams,
-            # then retry once.
+            # First failure at this corner: remove slanted wall seams around
+            # the whole vertical corner line (not just the shared edge), then
+            # retry once.
             if key not in tried_cleanup:
                 tried_cleanup.add(key)
-                if _dissolve_slanted_coplanar(bm, list(e.verts)):
+                line = [v for v in bm.verts if _same_xy(v, e.verts[0])]
+                if _dissolve_slanted_coplanar(bm, line):
                     continue
 
             done.add(key)
