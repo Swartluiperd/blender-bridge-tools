@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Blender backups and temporary files
+*.blend1
+*.blend2
+*.blend@
+*.blend~
+
+# Packaged add-on zips
+*.zip
+
+# OS / editor clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
